@@ -2,7 +2,7 @@
 
 Proyects Killer es una propuesta de plataforma para coordinar tres asistentes de programación con IA, ejecutados desde computadoras distintas, sobre un mismo proyecto de hackatón. El objetivo es convertir asistentes independientes en un equipo de trabajo verificable: con tareas explícitas, comunicación estructurada, cambios aislados en Git y validaciones antes de integrar.
 
-> **Estado del proyecto:** especificación inicial. Este repositorio todavía no contiene una aplicación ejecutable. La arquitectura, la pila y el flujo descritos aquí son la dirección propuesta para el desarrollo; no implican que esas capacidades ya estén implementadas.
+> **Estado del proyecto:** hay un MVP Java ejecutable en [`hackathon-killer-codigo/`](./hackathon-killer-codigo/). Incluye coordinador REST Spring Boot, estado en memoria y workers CLI; todavía no ofrece persistencia duradera, dashboard, creación de PR ni integración nativa con un proveedor de IA.
 
 ## Problema y objetivo
 
@@ -43,7 +43,7 @@ El sistema debe ayudar a analizar un reto y sus criterios de evaluación, propon
              └───────────┘
 ```
 
-Estos componentes son una propuesta, no una descripción de software ya disponible:
+Este diagrama y los componentes siguientes describen la dirección inicial propuesta, no la implementación actual:
 
 - **Coordinador central:** fuente de verdad para el estado global, registro y heartbeat de agentes, tareas y dependencias, asignaciones, mensajes, permisos, eventos y solicitudes de revisión. Debe integrarse con GitHub, validar evidencias, detectar desconexiones y limitar duplicados, reintentos y ciclos.
 - **Worker local:** proceso en cada computadora que se registra y declara identidad, rol y capacidades; mantiene heartbeat; prepara su workspace; recibe tareas; invoca un asistente mediante un adaptador; ejecuta comandos autorizados; captura resultados, pruebas y errores; y comunica bloqueos, commits y ramas.
@@ -52,9 +52,7 @@ Estos componentes son una propuesta, no una descripción de software ya disponib
 
 La dirección técnica prioriza ejecución local, bajo coste, instalación sencilla, observabilidad, seguridad, recuperación ante desconexiones y sustitución de asistentes.
 
-## Pila tecnológica inicial propuesta
-
-La inspección actual encontró únicamente este README y los metadatos de Git. No hay manifiestos de dependencias, código, configuración de CI/CD, `.github/` ni `.Proyects/`. Por tanto, no hay un lenguaje o framework ya establecido por el repositorio.
+La pila prevista originalmente era:
 
 | Área | Propuesta inicial |
 | --- | --- |
@@ -67,7 +65,81 @@ La inspección actual encontró únicamente este README y los metadatos de Git. 
 | Integración | Git, GitHub CLI, GitHub Actions y, cuando convenga, MCP/API/SDK |
 | Interfaz | CLI funcional y API observable primero; dashboard mínimo solo si el tiempo lo permite |
 
-Esta tabla es una propuesta de diseño: no declara dependencias instaladas ni obliga a incorporar todos estos componentes en el primer incremento.
+Esta tabla es una propuesta anterior de diseño; el MVP implementado utiliza Java y Maven.
+
+## Implementación actual
+
+```text
+┌───────────────────────────┐       HTTP / REST        ┌─────────────────────┐
+│ Coordinador Spring Boot   │◄─────────────────────────│ Worker Java CLI     │
+│ tareas, agentes, mensajes │                           │ adaptador MANUAL/CLI│
+│ repositorio en memoria    │                           │ Git y pruebas       │
+└───────────────────────────┘                           └─────────────────────┘
+```
+
+El código actual está en `hackathon-killer-codigo/` y usa Java 21, Maven multimódulo y Spring Boot 3.3.5:
+
+- `hk-core`: modelos, evidencias y máquina de estados.
+- `hk-coordinator`: API REST para registro/heartbeat de agentes, tareas y mensajes. El almacenamiento actual es en memoria y se pierde al reiniciar.
+- `hk-worker`: polling HTTP, ejecución de tareas, pruebas y operaciones Git en una rama de tarea.
+- **Adaptador MANUAL:** muestra la tarea y espera confirmación humana; no es ejecución autónoma.
+- **Adaptador CLI:** invoca un comando local configurado; no implementa ni presupone una integración con una IA externa.
+
+La arquitectura futura puede ampliar estas capacidades; no se deben confundir los elementos del roadmap con funciones ya disponibles.
+
+## Pila tecnológica actual
+
+| Área | Implementación actual |
+| --- | --- |
+| Coordinador | Java 21, Spring Boot 3.3.5, API HTTP en el puerto 8080 |
+| Persistencia | Repositorios en memoria; no durable |
+| Worker | Java 21, Picocli, polling HTTP |
+| Git y procesos | `ProcessBuilder`, captura acotada de salida y timeout |
+| Construcción y pruebas | Maven multimódulo, JUnit 5 |
+
+## Compilar, iniciar y probar el MVP
+
+Desde la raíz del repositorio:
+
+```powershell
+Set-Location .\hackathon-killer-codigo
+mvn clean test
+mvn package
+```
+
+Inicia el coordinador en una terminal:
+
+```powershell
+java -jar .\hk-coordinator\target\hk-coordinator-0.1.0-SNAPSHOT.jar
+```
+
+En otra terminal, inicia un worker. El ejemplo manual exige que una persona aplique los cambios y confirme `ok`:
+
+```powershell
+java -jar .\hk-worker\target\hk-worker-0.1.0-SNAPSHOT.jar `
+  --coordinator http://localhost:8080 `
+  --name "Agent B" --role DEVELOPER --adapter MANUAL `
+  --repo "C:\ruta\al\repositorio-de-trabajo" `
+  --test-cmd "mvn -q test"
+```
+
+El repositorio indicado debe ser la raíz de un checkout Git limpio, con remoto `origin` y permisos para publicar ramas. El worker crea una rama `feature/<tarea>-<agente>`; no reutiliza cambios locales ni permite commit/push desde `main` o `master`. `--test-cmd` se divide en argumentos por espacios (no se ejecuta mediante una shell); configúralo para el proyecto de trabajo.
+
+Para el adaptador `CLI`, se requiere `--assistant-cmd "<ejecutable> [argumentos]"`. El worker pasa el prompt de tarea como último argumento posicional y no invoca una shell. El comando y sus argumentos deben ser de confianza; la división es por espacios y no procesa comillas/expansiones como una shell. No se incluye un comando de asistente predeterminado ni una integración de IA.
+
+Con el worker registrado como `agent-b`, crea, prepara y asigna una tarea desde PowerShell:
+
+```powershell
+$base = "http://localhost:8080"
+$task = Invoke-RestMethod -Method Post -Uri "$base/api/tasks" `
+  -ContentType "application/json" `
+  -Body (@{ title = "Probar Agent B"; description = "Tarea de prueba"; acceptanceCriteria = @("Pruebas en verde") } | ConvertTo-Json)
+Invoke-RestMethod -Method Post -Uri "$base/api/tasks/$($task.id)/ready"
+Invoke-RestMethod -Method Post -Uri "$base/api/tasks/$($task.id)/assign" `
+  -ContentType "application/json" -Body (@{ agentId = "agent-b" } | ConvertTo-Json)
+```
+
+El coordinador cambia la tarea a `IN_PROGRESS` antes de que el worker ejecute; un segundo intento de reclamarla se rechaza por la máquina de estados. Los fallos de preparación Git, adaptador o pruebas dejan evidencia y pasan a `BLOCKED`. Si no se ejecuta un comando de pruebas, no se registra evidencia de tests y la máquina de estados no permite aprobar la tarea sin evidencia de pruebas satisfactoria.
 
 ## Roles iniciales
 
@@ -268,14 +340,14 @@ Los adaptadores y el modo manual asistido permitirán trabajar con capacidades d
 
 ## Roadmap inicial
 
-1. **Fase 0 — Documentación y contratos:** README, modelos de agentes, tareas y mensajes, estados, permisos y criterios de aceptación.
-2. **Fase 1 — Coordinador mínimo:** FastAPI, SQLite, registro de agentes, tareas, mensajes, heartbeats y máquina de estados.
-3. **Fase 2 — Worker local:** CLI, registro, recepción de tareas, ejecución local, captura de resultados y estado de conexión.
-4. **Fase 3 — Git:** ramas, commits, push, integración con GitHub CLI y pull requests.
-5. **Fase 4 — Revisión y validación:** solicitudes de revisión, pruebas, evidencias, rechazos, reintentos y criterios de aceptación.
-6. **Fase 5 — Adaptadores de asistentes:** adaptador CLI genérico, MCP, API/SDK y modo manual asistido.
-7. **Fase 6 — Dashboard y demo:** vistas de agentes, tareas y mensajes; estado de PRs; resultados de pruebas e informe final.
+1. **Documentación y contratos:** README, modelos de agentes, tareas y mensajes, estados, permisos y criterios de aceptación.
+2. **Coordinador MVP — implementado:** API Java para agentes, tareas, mensajes y máquina de estados; el almacenamiento actual es volátil.
+3. **Worker local — implementado:** registro, polling, ejecución, captura de resultados y estado de conexión.
+4. **Git — implementación inicial:** ramas por tarea, commit y push normal; creación y seguimiento de pull requests siguen pendientes.
+5. **Revisión y validación — parcial:** transiciones, evidencias y pruebas automatizadas; faltan persistencia durable y mayor automatización de revisión.
+6. **Adaptadores — inicial:** CLI genérico y modo manual asistido; no hay integración nativa de IA.
+7. **Dashboard y demo:** vistas de agentes, tareas y mensajes; estado de PRs, resultados de pruebas e informe final.
 
 ## Estado del repositorio y próximos pasos
 
-En la inspección para esta especificación, el repositorio contiene solo este `README.md` y metadatos de Git. No se detectaron código, manifiestos de dependencias, configuración de CI/CD, `.github/` ni `.Proyects/`. Por ello, las tecnologías y funciones anteriores son propuestas de desarrollo y no capacidades implementadas o verificadas. La siguiente etapa deberá acordar los contratos y políticas de `.Proyects/` antes de implementar el coordinador.
+El MVP Java está integrado en `hackathon-killer-codigo/`. Los repositorios del coordinador son volátiles, las tareas se ejecutan una a la vez por worker y el modo MANUAL requiere confirmación humana. La automatización de un asistente externo, persistencia durable, pull requests y pruebas de integración contra GitHub siguen pendientes.
